@@ -54,8 +54,32 @@ Item {
   readonly property string homeDir: Quickshell.env("HOME")
   readonly property string pluginDir: homeDir + "/.config/omarchy/plugins/io.github.weedwhitesandwine.omascratch"
   readonly property string stateDir: homeDir + "/.local/state/omarchy/omascratch"
-  readonly property string notesPath: stateDir + "/notes.txt"
+  readonly property string notesDir: stateDir + "/notes"
   readonly property string settingsPath: stateDir + "/settings.json"
+  readonly property string helperPath: pluginDir + "/omascratch-notes.py"
+
+  // "list" or "edit". The settings view sits over either one and returns to it.
+  property string view: "list"
+  // What the helper last reported, [{id, mtime, firstLine}] in disk order.
+  // notesLoaded stays false until one listing has succeeded, so nothing that
+  // prunes by this list can mistake "not read yet" for "there are no notes".
+  property var notes: []
+  property bool notesLoaded: false
+  property string listPending: ""
+  property int listIndex: 0
+  property string listError: ""
+  // The note on the edit screen. A new note has an id but no file until it
+  // first holds text, so one that is left blank leaves nothing behind.
+  property string currentId: ""
+  property bool currentIsNew: false
+  property bool dirtySinceOpen: false
+  // Set while the editor is filled from disk, so the fill is not mistaken
+  // for typing and written straight back.
+  property bool loadingNote: false
+  property string readingId: ""
+  readonly property var idPattern: /^[0-9]{8}-[0-9]{6}-[0-9a-f]{4}$/
+  readonly property string currentPath: root.currentId === "" ? "" : root.notesDir + "/" + root.currentId + ".txt"
+  readonly property var sortedNotes: root.sortNotes(root.notes)
 
   property int fontSize: 14
   property string position: "top-left"
@@ -89,15 +113,20 @@ Item {
     root.opened = true
     root.settingsOpen = false
     root.stayOnTop = false
-    Qt.callLater(function() { textArea.forceActiveFocus() })
+    root.showList()
   }
 
+  // Every way the panel closes passes through here or dismiss(), including
+  // a click elsewhere clearing the focus grab, so a save still waiting on
+  // its timer is written now rather than lost with the closed panel.
   function close() {
+    root.flushSave()
     root.opened = false
     root.recording = false
   }
 
   function dismiss() {
+    root.flushSave()
     root.opened = false
     root.recording = false
     if (root.shell && typeof root.shell.hide === "function")
@@ -122,11 +151,166 @@ Item {
   function closeSettings() {
     root.settingsOpen = false
     root.recording = false
-    Qt.callLater(function() { textArea.forceActiveFocus() })
+    root.focusView()
   }
 
   function isSettingsShortcut(event) {
     return event.key === Qt.Key_Comma && (event.modifiers & Qt.ControlModifier)
+  }
+
+  function isCtrl(event, key) {
+    return event.key === key && (event.modifiers & Qt.ControlModifier)
+  }
+
+  function isEnter(event) {
+    return event.key === Qt.Key_Return || event.key === Qt.Key_Enter
+  }
+
+  function focusView() {
+    Qt.callLater(function() {
+      if (root.view === "edit") textArea.forceActiveFocus()
+      else notesList.forceActiveFocus()
+    })
+  }
+
+  function showList() {
+    root.view = "list"
+    root.listIndex = 0
+    root.listError = ""
+    root.refreshList()
+    root.focusView()
+  }
+
+  function refreshList() { listProc.running = false; listProc.running = true }
+
+  // The helper is ours, but its answer is still checked: an id from here
+  // becomes a path the editor writes to.
+  function loadList(json) {
+    var parsed
+    try { parsed = JSON.parse(json || "[]") } catch (e) { return }
+    if (!Array.isArray(parsed)) return
+    var clean = []
+    for (var i = 0; i < parsed.length; i++) {
+      var n = parsed[i]
+      if (n && typeof n.id === "string" && root.idPattern.test(n.id)
+          && typeof n.mtime === "number" && typeof n.firstLine === "string")
+        clean.push({ id: n.id, mtime: n.mtime, firstLine: n.firstLine })
+    }
+    root.notes = clean
+    root.notesLoaded = true
+    root.listIndex = Math.max(0, Math.min(root.listIndex, clean.length - 1))
+  }
+
+  function sortNotes(list) {
+    return list.slice().sort(function(a, b) { return b.mtime - a.mtime })
+  }
+
+  function displayTitle(n) {
+    return n.firstLine || "Untitled"
+  }
+
+  // Stops at the first line with something on it, so a long note costs no
+  // more than its opening lines on every keystroke.
+  function firstLineOf(text) {
+    var m = /^\s*(\S[^\n]*)/.exec(text)
+    return m ? m[1].trim() : ""
+  }
+
+  function ago(ms) {
+    var s = Math.max(0, (Date.now() - ms) / 1000)
+    if (s < 60) return "now"
+    if (s < 3600) return Math.floor(s / 60) + "m"
+    if (s < 86400) return Math.floor(s / 3600) + "h"
+    if (s < 7 * 86400) return Math.floor(s / 86400) + "d"
+    return Qt.formatDate(new Date(ms), "MMM d")
+  }
+
+  function moveHighlight(step) {
+    var last = root.sortedNotes.length - 1
+    root.listIndex = Math.max(0, Math.min(last, root.listIndex + step))
+    notesList.positionViewAtIndex(root.listIndex, ListView.Contain)
+  }
+
+  function openHighlighted() {
+    var n = root.sortedNotes[root.listIndex]
+    if (n) root.openNote(n.id)
+  }
+
+  // The edit screen only appears once the read has succeeded. Showing it
+  // first would leave an empty editor whose autosave could write that
+  // emptiness over a note the reader merely failed to open.
+  function openNote(id) {
+    if (!root.idPattern.test(id)) return
+    root.listError = ""
+    root.readingId = id
+    notesReader.running = false
+    notesReader.running = true
+  }
+
+  function newNoteId() {
+    var hex = ""
+    for (var i = 0; i < 4; i++) hex += "0123456789abcdef"[Math.floor(Math.random() * 16)]
+    return Qt.formatDateTime(new Date(), "yyyyMMdd-HHmmss") + "-" + hex
+  }
+
+  function newNote() {
+    var id = root.newNoteId()
+    while (root.notes.some(function(n) { return n.id === id })) id = root.newNoteId()
+    root.startEditing(id, "", true)
+  }
+
+  function startEditing(id, text, isNew) {
+    saveTimer.stop()
+    root.savingNow = false
+    root.currentId = id
+    root.currentIsNew = isNew
+    root.dirtySinceOpen = false
+    root.loadingNote = true
+    textArea.text = text
+    textArea.cursorPosition = text.length
+    root.loadingNote = false
+    root.view = "edit"
+    root.focusView()
+  }
+
+  function writeCurrent() {
+    if (root.currentId === "" || root.loadingNote) return
+    if (root.currentIsNew && textArea.text.trim() === "") return
+    root.savingNow = true
+    notesFile.setText(textArea.text)
+    root.currentIsNew = false
+    root.dirtySinceOpen = true
+  }
+
+  function flushSave() {
+    if (!saveTimer.running) return
+    saveTimer.stop()
+    root.writeCurrent()
+  }
+
+  // The write lands on its own schedule, so the listing that follows may
+  // still see the old file. The row is put right from what is in the
+  // editor first; the listing, and notesFile's saved signal, confirm it.
+  function finishEditing() {
+    root.flushSave()
+    if (root.dirtySinceOpen) {
+      var id = root.currentId
+      var rest = root.notes.filter(function(n) { return n.id !== id })
+      rest.push({ id: id, mtime: Date.now(), firstLine: root.firstLineOf(textArea.text) })
+      root.notes = rest
+    }
+    root.showList()
+  }
+
+  function handleListKey(event) {
+    if (event.key === Qt.Key_Escape) root.dismiss()
+    else if (root.isSettingsShortcut(event)) root.openSettings()
+    else if (event.key === Qt.Key_Up) root.moveHighlight(-1)
+    else if (event.key === Qt.Key_Down) root.moveHighlight(1)
+    else if (root.isEnter(event) && !(event.modifiers & Qt.ControlModifier)) root.openHighlighted()
+    else if (root.isCtrl(event, Qt.Key_N)) root.newNote()
+    else return
+    event.accepted = true
   }
 
   // Everything read off disk goes through a reader that puts the ceiling in
@@ -160,25 +344,25 @@ Item {
 
   FileView {
     id: notesFile
-    path: root.notesPath
+    path: root.currentPath
     watchChanges: true
     atomicWrites: true
     blockAllReads: true
     preload: false
     printErrors: false
     // Saving changes the file, which fires this. Re-reading then replaces the
-    // editor's contents with what was on disk a moment ago — losing anything
-    // typed while the reader was starting up, and dropping the cursor to the
+    // editor's contents with what was on disk a moment ago, losing anything
+    // typed while the reader was starting up and dropping the cursor to the
     // top of the note mid-sentence. Our own writes are skipped; someone
-    // else's are still picked up.
+    // else's are still picked up, but only while that note is on screen.
     onFileChanged: {
       if (root.savingNow) { root.savingNow = false; return }
-      root.readNotes()
+      if (root.view === "edit" && !root.currentIsNew) root.openNote(root.currentId)
     }
+    onSaved: if (root.view === "list") root.refreshList()
   }
   property bool savingNow: false
 
-  function readNotes() { notesReader.running = false; notesReader.running = true }
   function readSettings() { settingsReader.running = false; settingsReader.running = true }
   function readBarConfig() { barConfigReader.running = false; barConfigReader.running = true }
 
@@ -192,14 +376,28 @@ Item {
   Process {
     id: notesReader
     command: ["python3", "-c", root.safeRead,
-              root.notesPath, String(root.notesCeiling)]
+              root.notesDir + "/" + root.readingId + ".txt", String(root.notesCeiling)]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.notesPending = text
     }
+    // Two callers: opening a note from the list, and re-reading the open
+    // note after someone else changed it on disk.
     onExited: function(code) {
-      if (code === 0) textArea.text = root.notesPending
+      var id = root.readingId
+      var text = root.notesPending
       root.notesPending = ""
+      if (code !== 0) {
+        if (root.view === "list") root.listError = "Could not open that note."
+        return
+      }
+      if (root.view === "edit" && id === root.currentId) {
+        root.loadingNote = true
+        textArea.text = text
+        root.loadingNote = false
+      } else if (root.view === "list") {
+        root.startEditing(id, text, false)
+      }
     }
   }
 
@@ -237,12 +435,31 @@ Item {
     id: saveTimer
     interval: 400
     repeat: false
-    onTriggered: { root.savingNow = true; notesFile.setText(textArea.text) }
+    onTriggered: root.writeCurrent()
   }
 
   Process {
     id: ensureDirsProc
     command: ["mkdir", "-p", root.stateDir]
+  }
+
+  Process {
+    id: migrateProc
+    command: ["python3", "-I", root.helperPath, "migrate", root.stateDir]
+    onExited: function(code) { root.refreshList() }
+  }
+
+  Process {
+    id: listProc
+    command: ["python3", "-I", root.helperPath, "list", root.stateDir]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.listPending = text
+    }
+    onExited: function(code) {
+      if (code === 0) root.loadList(root.listPending)
+      root.listPending = ""
+    }
   }
 
   FileView {
@@ -337,7 +554,7 @@ Item {
     ensureDirsProc.running = true
     Qt.callLater(function() {
       root.readSettings()
-      root.readNotes()
+      migrateProc.running = true
       root.readBarConfig()
       root.checkBarHidden()
     })
@@ -566,9 +783,81 @@ Item {
         // top-right corner. Keeping space clear beside it cost the full width
         // of both buttons on every line of the note, all the way down the
         // card, to keep two lines clear of them.
+        ListView {
+          id: notesList
+          visible: !root.settingsOpen && root.view === "list"
+          anchors.fill: parent
+          anchors.topMargin: headerRow.height + Style.spacing.xs
+          clip: true
+          model: root.sortedNotes
+          currentIndex: root.listIndex
+          keyNavigationEnabled: false
+          boundsBehavior: Flickable.StopAtBounds
+
+          delegate: Item {
+            width: notesList.width
+            height: Math.round(root.fontSize * 2.2)
+
+            Rectangle {
+              anchors.fill: parent
+              radius: root.cornerRadius
+              visible: index === root.listIndex
+              color: Style.selectionFillFor(root.foreground, Color.accent)
+            }
+
+            Text {
+              id: rowAgo
+              anchors.right: parent.right
+              anchors.rightMargin: Style.spacing.sm
+              anchors.verticalCenter: parent.verticalCenter
+              textFormat: Text.PlainText
+              text: root.ago(modelData.mtime)
+              color: Qt.darker(root.foreground, 1.4)
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            Text {
+              anchors.left: parent.left
+              anchors.leftMargin: Style.spacing.sm
+              anchors.right: rowAgo.left
+              anchors.rightMargin: Style.spacing.sm
+              anchors.verticalCenter: parent.verticalCenter
+              textFormat: Text.PlainText
+              elide: Text.ElideRight
+              text: root.displayTitle(modelData)
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: root.fontSize
+            }
+
+            MouseArea {
+              anchors.fill: parent
+              onClicked: { root.listIndex = index; root.openNote(modelData.id) }
+            }
+          }
+
+          Keys.onPressed: function(event) { root.handleListKey(event) }
+        }
+
+        Text {
+          visible: !root.settingsOpen && root.view === "list"
+                   && (root.listError !== "" || (root.notesLoaded && root.sortedNotes.length === 0))
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.bottom: parent.bottom
+          textFormat: Text.PlainText
+          wrapMode: Text.Wrap
+          horizontalAlignment: Text.AlignHCenter
+          text: root.listError !== "" ? root.listError : "No notes yet. Ctrl+N to start one."
+          color: root.listError !== "" ? Color.urgent : Qt.darker(root.foreground, 1.6)
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+        }
+
         ScrollView {
           id: notesScroll
-          visible: !root.settingsOpen
+          visible: !root.settingsOpen && root.view === "edit"
           anchors.fill: parent
           anchors.topMargin: headerRow.height + Style.spacing.xs
           clip: true
@@ -588,21 +877,19 @@ Item {
             color: root.foreground
             selectionColor: Style.selectionFillFor(root.foreground, Color.accent)
             selectedTextColor: root.foreground
-            placeholderText: "Scratchpad…"
+            placeholderText: "Write here. Ctrl+Enter when done."
             placeholderTextColor: Qt.darker(root.foreground, 1.6)
             background: Item {}
 
             Keys.onPressed: function(event) {
-              if (event.key === Qt.Key_Escape) {
-                root.dismiss()
-                event.accepted = true
-              } else if (root.isSettingsShortcut(event)) {
-                root.openSettings()
-                event.accepted = true
-              }
+              if (event.key === Qt.Key_Escape) root.dismiss()
+              else if (root.isSettingsShortcut(event)) root.openSettings()
+              else if (root.isEnter(event) && (event.modifiers & Qt.ControlModifier)) root.finishEditing()
+              else return
+              event.accepted = true
             }
 
-            onTextChanged: saveTimer.restart()
+            onTextChanged: if (!root.loadingNote) saveTimer.restart()
           }
         }
 
@@ -914,6 +1201,21 @@ Item {
               event.accepted = true
             }
           }
+        }
+
+        Text {
+          id: headerTitle
+          visible: !root.settingsOpen
+          anchors.left: parent.left
+          anchors.right: headerRow.left
+          anchors.rightMargin: Style.spacing.sm
+          anchors.verticalCenter: headerRow.verticalCenter
+          textFormat: Text.PlainText
+          elide: Text.ElideRight
+          text: root.view === "list" ? "Notes" : (root.firstLineOf(textArea.text) || "Untitled")
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
         }
 
         Row {

@@ -156,6 +156,12 @@ class TestMigrate(Base):
         self.assertFalse(os.path.exists(os.path.join(self.state, "notes.txt")))
         self.assertEqual(self.read("notes.txt.bak"), b"my scratch\n")
 
+    def test_keeps_last_edited_time(self):
+        self.write("notes.txt", "dated", mtime=1700000000)
+        helper.migrate(self.state)
+        moved = os.path.join(self.notes, self.notes_files()[0])
+        self.assertEqual(int(os.stat(moved).st_mtime), 1700000000)
+
     def test_blank_note_left_alone(self):
         self.write("notes.txt", "  \n")
         self.assertEqual(helper.migrate(self.state), 0)

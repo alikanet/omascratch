@@ -115,7 +115,7 @@ def migrate(state_dir):
     old = os.path.join(state_dir, "notes.txt")
     try:
         os.makedirs(notes_dir, exist_ok=True)
-        raw, _ = read_head(old, NOTE_CEILING + 1)
+        raw, mtime = read_head(old, NOTE_CEILING + 1)
         if raw is None or len(raw) > NOTE_CEILING or not raw.strip():
             return 0
         dst = os.path.join(notes_dir, new_id() + ".txt")
@@ -124,6 +124,9 @@ def migrate(state_dir):
             handle.write(raw)
             handle.flush()
             os.fsync(handle.fileno())
+        # The list shows when a note was last edited, and the migration is
+        # not an edit.
+        os.utime(tmp, (mtime, mtime))
         os.rename(tmp, dst)
         os.rename(old, free_name(old + ".bak"))
     except OSError:
