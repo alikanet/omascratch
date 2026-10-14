@@ -82,7 +82,15 @@ Item {
   property string sortMode: "latest"
   readonly property var sortModes: ["latest", "oldest", "az", "za"]
   readonly property var sortLabels: ({ latest: "Latest first", oldest: "Oldest first", az: "A to Z", za: "Z to A" })
-  readonly property var sortedNotes: root.sortNotes(root.notes, root.sortMode)
+  readonly property string titlesPath: stateDir + "/titles.json"
+  // Only notes given a title with Ctrl+T appear here. titlesLoaded stays
+  // false after a read that failed, and nothing writes the file until it is
+  // true: writing then would replace every title with the one being set.
+  property var titles: ({})
+  property bool titlesLoaded: false
+  property string titlesPending: ""
+  property bool editingTitle: false
+  readonly property var sortedNotes: root.sortNotes(root.notes, root.sortMode, root.titles)
 
   property int fontSize: 14
   property string position: "top-left"
@@ -178,6 +186,7 @@ Item {
 
   function showList() {
     root.view = "list"
+    root.editingTitle = false
     root.listIndex = 0
     root.listError = ""
     root.refreshList()
@@ -207,11 +216,11 @@ Item {
   // Titles compare case-insensitively and by locale, so accented letters sit
   // with their plain forms instead of after the end of the alphabet. Equal
   // titles fall back to the newest first.
-  function sortNotes(list, mode) {
+  function sortNotes(list, mode, titles) {
     return list.slice().sort(function(a, b) {
       if (mode === "oldest") return a.mtime - b.mtime
       if (mode === "az" || mode === "za") {
-        var c = root.displayTitle(a).toLowerCase().localeCompare(root.displayTitle(b).toLowerCase())
+        var c = root.displayTitle(a, titles).toLowerCase().localeCompare(root.displayTitle(b, titles).toLowerCase())
         if (c !== 0) return mode === "az" ? c : -c
       }
       return b.mtime - a.mtime
@@ -225,8 +234,67 @@ Item {
     notesList.positionViewAtIndex(0, ListView.Beginning)
   }
 
-  function displayTitle(n) {
-    return n.firstLine || "Untitled"
+  function displayTitle(n, titles) {
+    return (titles && titles[n.id]) || n.firstLine || "Untitled"
+  }
+
+  function readTitles() { titlesReader.running = false; titlesReader.running = true }
+
+  // A hand-edited file can hold anything, so only well-formed ids with short
+  // string titles are kept.
+  function loadTitles(json) {
+    var parsed
+    try { parsed = JSON.parse(json || "{}") } catch (e) { return }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return
+    var clean = {}
+    for (var k in parsed)
+      if (root.idPattern.test(k) && typeof parsed[k] === "string" && parsed[k].trim() !== "")
+        clean[k] = parsed[k].trim().slice(0, 200)
+    root.titles = clean
+    root.titlesLoaded = true
+  }
+
+  // Titles of notes that no longer exist are dropped here, but only against a
+  // list that has actually been read, or an unread list would drop them all.
+  function setTitle(id, title) {
+    if (!root.titlesLoaded || !root.idPattern.test(id)) return false
+    var keep = {}
+    for (var i = 0; i < root.notes.length; i++) keep[root.notes[i].id] = true
+    if (root.currentId !== "") keep[root.currentId] = true
+    var next = {}
+    for (var k in root.titles)
+      if (k !== id && (!root.notesLoaded || keep[k])) next[k] = root.titles[k]
+    var t = title.trim().slice(0, 200)
+    if (t !== "") next[id] = t
+    root.titles = next
+    titlesFile.setText(JSON.stringify(next, null, 2) + "\n")
+    return true
+  }
+
+  function beginTitleEdit() {
+    if (!root.titlesLoaded) return
+    root.editingTitle = true
+    titleField.text = root.titles[root.currentId] || ""
+    Qt.callLater(function() { titleField.forceActiveFocus(); titleField.selectAll() })
+  }
+
+  // A titled note is not a blank one, so a new note gets its file as soon as
+  // it has a title, even with nothing written in it yet.
+  function confirmTitle() {
+    var t = titleField.text.trim()
+    if (root.setTitle(root.currentId, t) && t !== "" && root.currentIsNew) {
+      root.savingNow = true
+      notesFile.setText(textArea.text)
+      root.currentIsNew = false
+      root.dirtySinceOpen = true
+    }
+    root.editingTitle = false
+    textArea.forceActiveFocus()
+  }
+
+  function cancelTitle() {
+    root.editingTitle = false
+    textArea.forceActiveFocus()
   }
 
   // Stops at the first line with something on it, so a long note costs no
@@ -467,7 +535,7 @@ Item {
   Process {
     id: migrateProc
     command: ["python3", "-I", root.helperPath, "migrate", root.stateDir]
-    onExited: function(code) { root.refreshList() }
+    onExited: function(code) { root.refreshList(); root.readTitles() }
   }
 
   Process {
@@ -481,6 +549,33 @@ Item {
       if (code === 0) root.loadList(root.listPending)
       root.listPending = ""
     }
+  }
+
+  Process {
+    id: titlesReader
+    command: ["python3", "-c", root.safeRead,
+              root.titlesPath, String(root.settingsCeiling)]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.titlesPending = text
+    }
+    // Exit 2 is the reader's "not there", which is a first run and an empty
+    // set of titles. Any other failure leaves titles unloaded.
+    onExited: function(code) {
+      if (code === 0) root.loadTitles(root.titlesPending)
+      else if (code === 2) { root.titles = {}; root.titlesLoaded = true }
+      root.titlesPending = ""
+    }
+  }
+
+  FileView {
+    id: titlesFile
+    path: root.titlesPath
+    watchChanges: false
+    atomicWrites: true
+    blockAllReads: true
+    preload: false
+    printErrors: false
   }
 
   FileView {
@@ -849,7 +944,7 @@ Item {
               anchors.verticalCenter: parent.verticalCenter
               textFormat: Text.PlainText
               elide: Text.ElideRight
-              text: root.displayTitle(modelData)
+              text: root.displayTitle(modelData, root.titles)
               color: root.foreground
               font.family: root.fontFamily
               font.pixelSize: root.fontSize
@@ -909,6 +1004,7 @@ Item {
               if (event.key === Qt.Key_Escape) root.dismiss()
               else if (root.isSettingsShortcut(event)) root.openSettings()
               else if (root.isEnter(event) && (event.modifiers & Qt.ControlModifier)) root.finishEditing()
+              else if (root.isCtrl(event, Qt.Key_T)) root.beginTitleEdit()
               else return
               event.accepted = true
             }
@@ -1229,7 +1325,7 @@ Item {
 
         Text {
           id: headerTitle
-          visible: !root.settingsOpen
+          visible: !root.settingsOpen && !root.editingTitle
           anchors.left: parent.left
           anchors.right: headerRow.left
           anchors.rightMargin: Style.spacing.sm
@@ -1237,10 +1333,29 @@ Item {
           textFormat: Text.PlainText
           elide: Text.ElideRight
           text: root.view === "list" ? "Notes · " + root.sortLabels[root.sortMode]
-                                     : (root.firstLineOf(textArea.text) || "Untitled")
+                                     : (root.titles[root.currentId] || root.firstLineOf(textArea.text) || "Untitled")
           color: root.foreground
           font.family: root.fontFamily
           font.pixelSize: Style.font.body
+        }
+
+        TextField {
+          id: titleField
+          visible: !root.settingsOpen && root.editingTitle
+          anchors.left: parent.left
+          anchors.right: headerRow.left
+          anchors.rightMargin: Style.spacing.sm
+          anchors.verticalCenter: headerRow.verticalCenter
+          foreground: root.foreground
+          verticalPadding: Style.spacing.xs
+          font.family: root.fontFamily
+          placeholderText: "Title (empty uses the first line)"
+          Keys.onPressed: function(event) {
+            if (root.isEnter(event)) root.confirmTitle()
+            else if (event.key === Qt.Key_Escape) root.cancelTitle()
+            else return
+            event.accepted = true
+          }
         }
 
         Row {
