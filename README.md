@@ -44,7 +44,8 @@ The panel opens on a list of your notes with the first one highlighted.
 | Esc | Save and close the panel |
 
 A note's title is its first line unless you set one with Ctrl+T. Ctrl+,
-opens settings from either screen.
+opens settings from either screen, and Ctrl+? (hinted in grey in the
+bottom-right corner) lists the keys for whichever screen you are on.
 
 Notes live in `~/.local/state/omarchy/omascratch/notes/`, one plain text
 file each. Custom titles are kept in `titles.json` next to it, and deleted

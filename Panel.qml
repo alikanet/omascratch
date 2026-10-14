@@ -126,6 +126,7 @@ Item {
   function open(payloadJson) {
     root.opened = true
     root.settingsOpen = false
+    root.helpOpen = false
     root.stayOnTop = false
     root.showList()
   }
@@ -170,6 +171,48 @@ Item {
 
   function isSettingsShortcut(event) {
     return event.key === Qt.Key_Comma && (event.modifiers & Qt.ControlModifier)
+  }
+
+  // Ctrl+? is Ctrl+Shift+/ on a US layout, which arrives as either key
+  // depending on how the compositor resolves the shifted symbol.
+  function isHelpShortcut(event) {
+    return (event.key === Qt.Key_Question || event.key === Qt.Key_Slash)
+      && (event.modifiers & Qt.ControlModifier)
+  }
+
+  // The help view sits over whichever screen opened it and hands the focus
+  // back to that screen, settings included, when it closes.
+  property bool helpOpen: false
+  property string helpFrom: "list"
+  readonly property var helpSections: ({
+    list: { title: "List", rows: [
+      ["Up / Down", "Move the highlight"],
+      ["Enter", "Open the highlighted note"],
+      ["Ctrl+N", "New note"],
+      ["Ctrl+S", "Change the order"],
+      ["Ctrl+D, Ctrl+D", "Delete the highlighted note"],
+      ["Esc", "Close the panel"]] },
+    edit: { title: "Note", rows: [
+      ["Ctrl+Enter", "Save and go back to the list"],
+      ["Ctrl+T", "Set the title (empty uses the first line)"],
+      ["Esc", "Save and close the panel"]] },
+    settings: { title: "Settings", rows: [
+      ["Esc", "Back to where you were"]] },
+    everywhere: { title: "Everywhere", rows: [
+      ["Ctrl+,", "Settings"],
+      ["Ctrl+?", "This help"]] }
+  })
+
+  function openHelp() {
+    root.helpFrom = root.settingsOpen ? "settings" : root.view
+    root.helpOpen = true
+    Qt.callLater(function() { helpKeys.forceActiveFocus() })
+  }
+
+  function closeHelp() {
+    root.helpOpen = false
+    if (root.settingsOpen) Qt.callLater(function() { settingsKeys.forceActiveFocus() })
+    else root.focusView()
   }
 
   function isCtrl(event, key) {
@@ -440,6 +483,7 @@ Item {
     root.armedDeleteId = ""
     if (event.key === Qt.Key_Escape) root.dismiss()
     else if (root.isSettingsShortcut(event)) root.openSettings()
+    else if (root.isHelpShortcut(event)) root.openHelp()
     else if (event.key === Qt.Key_Up) root.moveHighlight(-1)
     else if (event.key === Qt.Key_Down) root.moveHighlight(1)
     else if (root.isEnter(event) && !(event.modifiers & Qt.ControlModifier)) root.openHighlighted()
@@ -964,9 +1008,10 @@ Item {
         // card, to keep two lines clear of them.
         ListView {
           id: notesList
-          visible: !root.settingsOpen && root.view === "list"
+          visible: !root.settingsOpen && !root.helpOpen && root.view === "list"
           anchors.fill: parent
           anchors.topMargin: headerRow.height + Style.spacing.xs
+          anchors.bottomMargin: helpHint.height + Style.spacing.xs
           clip: true
           model: root.sortedNotes
           currentIndex: root.listIndex
@@ -1020,11 +1065,12 @@ Item {
         }
 
         Text {
-          visible: !root.settingsOpen && root.view === "list"
+          visible: !root.settingsOpen && !root.helpOpen && root.view === "list"
                    && (root.listError !== "" || (root.notesLoaded && root.sortedNotes.length === 0))
           anchors.left: parent.left
           anchors.right: parent.right
-          anchors.bottom: parent.bottom
+          anchors.bottom: helpHint.top
+          anchors.bottomMargin: Style.spacing.xs
           textFormat: Text.PlainText
           wrapMode: Text.Wrap
           horizontalAlignment: Text.AlignHCenter
@@ -1036,9 +1082,10 @@ Item {
 
         ScrollView {
           id: notesScroll
-          visible: !root.settingsOpen && root.view === "edit"
+          visible: !root.settingsOpen && !root.helpOpen && root.view === "edit"
           anchors.fill: parent
           anchors.topMargin: headerRow.height + Style.spacing.xs
+          anchors.bottomMargin: helpHint.height + Style.spacing.xs
           clip: true
           ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
 
@@ -1063,6 +1110,7 @@ Item {
             Keys.onPressed: function(event) {
               if (event.key === Qt.Key_Escape) root.dismiss()
               else if (root.isSettingsShortcut(event)) root.openSettings()
+              else if (root.isHelpShortcut(event)) root.openHelp()
               else if (root.isEnter(event) && (event.modifiers & Qt.ControlModifier)) root.finishEditing()
               else if (root.isCtrl(event, Qt.Key_T)) root.beginTitleEdit()
               else return
@@ -1074,9 +1122,10 @@ Item {
         }
 
         Flickable {
-          visible: root.settingsOpen
+          visible: root.settingsOpen && !root.helpOpen
           anchors.fill: parent
           anchors.topMargin: headerRow.height + Style.spacing.xs
+          anchors.bottomMargin: helpHint.height + Style.spacing.xs
           contentWidth: width
           contentHeight: settingsColumn.implicitHeight
           clip: true
@@ -1379,21 +1428,112 @@ Item {
             if (event.key === Qt.Key_Escape || root.isSettingsShortcut(event)) {
               root.closeSettings()
               event.accepted = true
+            } else if (root.isHelpShortcut(event)) {
+              root.openHelp()
+              event.accepted = true
+            }
+          }
+        }
+
+        // The help view's focus holder, on the same terms as settingsKeys.
+        Item {
+          id: helpKeys
+          width: 1
+          height: 1
+          Keys.onPressed: function(event) {
+            if (event.key === Qt.Key_Escape || root.isHelpShortcut(event)) {
+              root.closeHelp()
+              event.accepted = true
+            }
+          }
+        }
+
+        Flickable {
+          visible: root.helpOpen
+          anchors.fill: parent
+          anchors.topMargin: headerRow.height + Style.spacing.xs
+          anchors.bottomMargin: helpHint.height + Style.spacing.xs
+          contentWidth: width
+          contentHeight: helpColumn.implicitHeight
+          clip: true
+
+          Column {
+            id: helpColumn
+            width: parent.width
+            spacing: Style.spacing.lg
+
+            Repeater {
+              model: root.helpOpen ? [root.helpSections[root.helpFrom], root.helpSections.everywhere] : []
+
+              Column {
+                property var section: modelData
+                width: helpColumn.width
+                spacing: Style.spacing.xs
+
+                Text {
+                  textFormat: Text.PlainText
+                  text: section.title
+                  color: Qt.darker(root.foreground, 1.4)
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+
+                Repeater {
+                  model: section.rows
+
+                  Row {
+                    width: helpColumn.width
+                    spacing: Style.spacing.sm
+
+                    Text {
+                      width: Math.round(helpColumn.width * 0.38)
+                      textFormat: Text.PlainText
+                      elide: Text.ElideRight
+                      text: modelData[0]
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.body
+                    }
+
+                    Text {
+                      width: helpColumn.width * 0.62 - Style.spacing.sm
+                      textFormat: Text.PlainText
+                      wrapMode: Text.Wrap
+                      text: modelData[1]
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.body
+                    }
+                  }
+                }
+              }
             }
           }
         }
 
         Text {
+          id: helpHint
+          anchors.right: parent.right
+          anchors.bottom: parent.bottom
+          textFormat: Text.PlainText
+          text: root.helpOpen ? "Esc to close" : "Ctrl+? help"
+          color: Qt.darker(root.foreground, 1.6)
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+        }
+
+        Text {
           id: headerTitle
-          visible: !root.settingsOpen && !root.editingTitle
+          visible: root.helpOpen || (!root.settingsOpen && !root.editingTitle)
           anchors.left: parent.left
           anchors.right: headerRow.left
           anchors.rightMargin: Style.spacing.sm
           anchors.verticalCenter: headerRow.verticalCenter
           textFormat: Text.PlainText
           elide: Text.ElideRight
-          text: root.view === "list" ? "Notes · " + root.sortLabels[root.sortMode]
-                                     : (root.titles[root.currentId] || root.firstLineOf(textArea.text) || "Untitled")
+          text: root.helpOpen ? "Help"
+                : root.view === "list" ? "Notes · " + root.sortLabels[root.sortMode]
+                : (root.titles[root.currentId] || root.firstLineOf(textArea.text) || "Untitled")
           color: root.foreground
           font.family: root.fontFamily
           font.pixelSize: Style.font.body
@@ -1401,7 +1541,7 @@ Item {
 
         TextField {
           id: titleField
-          visible: !root.settingsOpen && root.editingTitle
+          visible: !root.settingsOpen && !root.helpOpen && root.editingTitle
           anchors.left: parent.left
           anchors.right: headerRow.left
           anchors.rightMargin: Style.spacing.sm
