@@ -79,7 +79,10 @@ Item {
   property string readingId: ""
   readonly property var idPattern: /^[0-9]{8}-[0-9]{6}-[0-9a-f]{4}$/
   readonly property string currentPath: root.currentId === "" ? "" : root.notesDir + "/" + root.currentId + ".txt"
-  readonly property var sortedNotes: root.sortNotes(root.notes)
+  property string sortMode: "latest"
+  readonly property var sortModes: ["latest", "oldest", "az", "za"]
+  readonly property var sortLabels: ({ latest: "Latest first", oldest: "Oldest first", az: "A to Z", za: "Z to A" })
+  readonly property var sortedNotes: root.sortNotes(root.notes, root.sortMode)
 
   property int fontSize: 14
   property string position: "top-left"
@@ -201,8 +204,25 @@ Item {
     root.listIndex = Math.max(0, Math.min(root.listIndex, clean.length - 1))
   }
 
-  function sortNotes(list) {
-    return list.slice().sort(function(a, b) { return b.mtime - a.mtime })
+  // Titles compare case-insensitively and by locale, so accented letters sit
+  // with their plain forms instead of after the end of the alphabet. Equal
+  // titles fall back to the newest first.
+  function sortNotes(list, mode) {
+    return list.slice().sort(function(a, b) {
+      if (mode === "oldest") return a.mtime - b.mtime
+      if (mode === "az" || mode === "za") {
+        var c = root.displayTitle(a).toLowerCase().localeCompare(root.displayTitle(b).toLowerCase())
+        if (c !== 0) return mode === "az" ? c : -c
+      }
+      return b.mtime - a.mtime
+    })
+  }
+
+  function cycleSort() {
+    var i = root.sortModes.indexOf(root.sortMode)
+    root.sortMode = root.sortModes[(i + 1) % root.sortModes.length]
+    root.listIndex = 0
+    notesList.positionViewAtIndex(0, ListView.Beginning)
   }
 
   function displayTitle(n) {
@@ -309,6 +329,7 @@ Item {
     else if (event.key === Qt.Key_Down) root.moveHighlight(1)
     else if (root.isEnter(event) && !(event.modifiers & Qt.ControlModifier)) root.openHighlighted()
     else if (root.isCtrl(event, Qt.Key_N)) root.newNote()
+    else if (root.isCtrl(event, Qt.Key_S)) root.cycleSort()
     else return
     event.accepted = true
   }
@@ -527,6 +548,7 @@ Item {
       root.keybind = parsed.keybind
     if (typeof parsed.cardWidth === "number") root.setCardWidth(parsed.cardWidth)
     if (typeof parsed.cardHeight === "number") root.setCardHeight(parsed.cardHeight)
+    if (root.sortModes.indexOf(parsed.sort) !== -1) root.sortMode = parsed.sort
     root.settingsLoaded = true
   }
 
@@ -540,7 +562,8 @@ Item {
       position: root.position,
       keybind: root.keybind,
       cardWidth: root.cardWidth,
-      cardHeight: root.cardHeight
+      cardHeight: root.cardHeight,
+      sort: root.sortMode
     }, null, 2) + "\n")
   }
 
@@ -549,6 +572,7 @@ Item {
   onKeybindChanged: scheduleSettingsSave()
   onCardWidthChanged: scheduleSettingsSave()
   onCardHeightChanged: scheduleSettingsSave()
+  onSortModeChanged: scheduleSettingsSave()
 
   Component.onCompleted: {
     ensureDirsProc.running = true
@@ -1212,7 +1236,8 @@ Item {
           anchors.verticalCenter: headerRow.verticalCenter
           textFormat: Text.PlainText
           elide: Text.ElideRight
-          text: root.view === "list" ? "Notes" : (root.firstLineOf(textArea.text) || "Untitled")
+          text: root.view === "list" ? "Notes · " + root.sortLabels[root.sortMode]
+                                     : (root.firstLineOf(textArea.text) || "Untitled")
           color: root.foreground
           font.family: root.fontFamily
           font.pixelSize: Style.font.body
