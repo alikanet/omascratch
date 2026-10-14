@@ -287,6 +287,10 @@ Item {
   function confirmTitle() {
     var t = titleField.text.trim()
     if (root.setTitle(root.currentId, t) && t !== "" && root.currentIsNew) {
+      // This write already holds the editor's text; a pending autosave would
+      // only write it again, and its change notice would then read as
+      // someone else's edit.
+      saveTimer.stop()
       root.savingNow = true
       notesFile.setText(textArea.text)
       root.currentIsNew = false
@@ -334,9 +338,35 @@ Item {
   function openNote(id) {
     if (!root.idPattern.test(id)) return
     root.listError = ""
+    root.startRead(id, "open")
+  }
+
+  // One read at a time, each remembering which note it is for and why, so a
+  // read that finishes late is never credited to another note or used to
+  // reopen a note the user has already left. A read asked for while one is
+  // running waits its turn; only the latest request is kept.
+  property var activeRead: null
+  property var queuedRead: null
+  function startRead(id, purpose) {
+    if (notesReader.running) { root.queuedRead = { id: id, purpose: purpose }; return }
+    root.activeRead = { id: id, purpose: purpose }
     root.readingId = id
-    notesReader.running = false
     notesReader.running = true
+  }
+
+  function finishRead(read, code, text) {
+    if (read.purpose === "open") {
+      if (root.view !== "list") return
+      if (code === 0) root.startEditing(read.id, text, false)
+      else root.listError = "Could not open that note."
+    } else if (code === 0 && root.view === "edit" && read.id === root.currentId
+               && !saveTimer.running) {
+      // Typing still waiting to be saved is newer than what is on disk, so a
+      // reload never lands on top of it.
+      root.loadingNote = true
+      textArea.text = text
+      root.loadingNote = false
+    }
   }
 
   function newNoteId() {
@@ -398,6 +428,8 @@ Item {
   // presses, so modifiers alone leave the armed row armed.
   function handleListKey(event) {
     if (root.isBareModifier(event.key)) return
+    // Holding Ctrl+D would otherwise confirm itself on the first key repeat.
+    if (event.isAutoRepeat && root.isCtrl(event, Qt.Key_D)) { event.accepted = true; return }
     var highlighted = root.sortedNotes[root.listIndex]
     if (root.isCtrl(event, Qt.Key_D)) {
       if (highlighted && root.armedDeleteId === highlighted.id) root.deleteNote(highlighted.id)
@@ -469,7 +501,8 @@ Item {
     // else's are still picked up, but only while that note is on screen.
     onFileChanged: {
       if (root.savingNow) { root.savingNow = false; return }
-      if (root.view === "edit" && !root.currentIsNew) root.openNote(root.currentId)
+      if (root.view === "edit" && !root.currentIsNew && !saveTimer.running)
+        root.startRead(root.currentId, "reload")
     }
     onSaved: if (root.view === "list") root.refreshList()
   }
@@ -493,22 +526,16 @@ Item {
       waitForEnd: true
       onStreamFinished: root.notesPending = text
     }
-    // Two callers: opening a note from the list, and re-reading the open
-    // note after someone else changed it on disk.
     onExited: function(code) {
-      var id = root.readingId
+      var read = root.activeRead
       var text = root.notesPending
       root.notesPending = ""
-      if (code !== 0) {
-        if (root.view === "list") root.listError = "Could not open that note."
-        return
-      }
-      if (root.view === "edit" && id === root.currentId) {
-        root.loadingNote = true
-        textArea.text = text
-        root.loadingNote = false
-      } else if (root.view === "list") {
-        root.startEditing(id, text, false)
+      root.activeRead = null
+      if (read) root.finishRead(read, code, text)
+      if (root.queuedRead) {
+        var next = root.queuedRead
+        root.queuedRead = null
+        root.startRead(next.id, next.purpose)
       }
     }
   }
