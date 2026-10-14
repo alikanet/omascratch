@@ -90,6 +90,9 @@ Item {
   property bool titlesLoaded: false
   property string titlesPending: ""
   property bool editingTitle: false
+  // The row waiting for its second Ctrl+D. Anything else clears it.
+  property string armedDeleteId: ""
+  property string deletingId: ""
   readonly property var sortedNotes: root.sortNotes(root.notes, root.sortMode, root.titles)
 
   property int fontSize: 14
@@ -187,6 +190,7 @@ Item {
   function showList() {
     root.view = "list"
     root.editingTitle = false
+    root.armedDeleteId = ""
     root.listIndex = 0
     root.listError = ""
     root.refreshList()
@@ -390,7 +394,18 @@ Item {
     root.showList()
   }
 
+  // A bare Ctrl press arrives as a key of its own between the two Ctrl+D
+  // presses, so modifiers alone leave the armed row armed.
   function handleListKey(event) {
+    if (root.isBareModifier(event.key)) return
+    var highlighted = root.sortedNotes[root.listIndex]
+    if (root.isCtrl(event, Qt.Key_D)) {
+      if (highlighted && root.armedDeleteId === highlighted.id) root.deleteNote(highlighted.id)
+      else root.armedDeleteId = highlighted ? highlighted.id : ""
+      event.accepted = true
+      return
+    }
+    root.armedDeleteId = ""
     if (event.key === Qt.Key_Escape) root.dismiss()
     else if (root.isSettingsShortcut(event)) root.openSettings()
     else if (event.key === Qt.Key_Up) root.moveHighlight(-1)
@@ -400,6 +415,14 @@ Item {
     else if (root.isCtrl(event, Qt.Key_S)) root.cycleSort()
     else return
     event.accepted = true
+  }
+
+  function deleteNote(id) {
+    root.armedDeleteId = ""
+    if (!root.idPattern.test(id) || deleteProc.running) return
+    root.deletingId = id
+    deleteProc.command = ["python3", "-I", root.helperPath, "delete", root.stateDir, id]
+    deleteProc.running = true
   }
 
   // Everything read off disk goes through a reader that puts the ceiling in
@@ -576,6 +599,16 @@ Item {
     blockAllReads: true
     preload: false
     printErrors: false
+  }
+
+  Process {
+    id: deleteProc
+    onExited: function(code) {
+      if (code === 0 && root.titlesLoaded && root.titles[root.deletingId]) root.setTitle(root.deletingId, "")
+      else if (code !== 0) root.listError = "Could not delete that note."
+      root.deletingId = ""
+      root.refreshList()
+    }
   }
 
   FileView {
@@ -930,8 +963,8 @@ Item {
               anchors.rightMargin: Style.spacing.sm
               anchors.verticalCenter: parent.verticalCenter
               textFormat: Text.PlainText
-              text: root.ago(modelData.mtime)
-              color: Qt.darker(root.foreground, 1.4)
+              text: modelData.id === root.armedDeleteId ? "Ctrl+D again to delete" : root.ago(modelData.mtime)
+              color: modelData.id === root.armedDeleteId ? Color.urgent : Qt.darker(root.foreground, 1.4)
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
             }
@@ -952,7 +985,7 @@ Item {
 
             MouseArea {
               anchors.fill: parent
-              onClicked: { root.listIndex = index; root.openNote(modelData.id) }
+              onClicked: { root.armedDeleteId = ""; root.listIndex = index; root.openNote(modelData.id) }
             }
           }
 
