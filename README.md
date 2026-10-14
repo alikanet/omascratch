@@ -8,7 +8,8 @@ down, close — your text is still waiting there the next time you open it.
 
 ## Features
 
-- Notes autosave to disk as you type (debounced, no save button).
+- Several standing notes, each in its own file, picked from a list that the
+  panel opens on. Notes autosave as you type (no save button).
 - Docks to any of the four screen corners; automatically clears whichever
   edge the Omarchy bar is docked to (top/bottom/left/right), so it never
   paints over the bar's own icons.
@@ -22,6 +23,34 @@ down, close — your text is still waiting there the next time you open it.
 - **Pin button**: by default, clicking anywhere outside the panel closes it
   (matching every other panel in Omarchy's shell). Pin keeps it open instead,
   so it can sit visible in the corner while you work in other windows.
+
+## Multiple notes
+
+The panel opens on a list of your notes with the first one highlighted.
+
+| On the list | |
+|---|---|
+| Up / Down | Move the highlight |
+| Enter | Open the highlighted note |
+| Ctrl+N | New note |
+| Ctrl+S | Sort: latest first, oldest first, A to Z, Z to A |
+| Ctrl+D, Ctrl+D | Delete the highlighted note (it goes to the trash folder) |
+| Esc | Close the panel |
+
+| In a note | |
+|---|---|
+| Ctrl+Enter | Save and go back to the list |
+| Ctrl+T | Give the note a title (empty goes back to using its first line) |
+| Esc | Save and close the panel |
+
+A note's title is its first line unless you set one with Ctrl+T. Ctrl+,
+opens settings from either screen.
+
+Notes live in `~/.local/state/omarchy/omascratch/notes/`, one plain text
+file each. Custom titles are kept in `titles.json` next to it, and deleted
+notes are moved to `trash/` rather than erased. Upgrading from a version
+with a single scratchpad turns it into your first note and keeps the
+original as `notes.txt.bak`.
 
 ## Install
 
@@ -87,9 +116,10 @@ the panel's picker, so the shortcut never ends up bound twice.
 
 - Open/close: your keybind, or the bar icon, or
   `omarchy-shell shell toggle io.github.weedwhitesandwine.omascratch`.
-- `Escape` closes the panel while the notes view has focus.
-- `Ctrl+,` opens settings, and `Escape` there goes back to the notes without
-  closing the panel. The gear icon (top-right of the card) does the same.
+- `Escape` closes the panel from the list or from a note (a note is saved
+  first). The other keys are under [Multiple notes](#multiple-notes).
+- `Ctrl+,` opens settings, and `Escape` there goes back to the list or note
+  you came from without closing the panel. The gear icon (top-right of the card) does the same.
 - Settings:
   - **Font size** — `−`/`+` steppers, 10–28px.
   - **Size** — `−`/`+` steppers for the card's width and height.
@@ -117,14 +147,20 @@ Every path it touches, and when:
 
 | Path | When |
 |---|---|
-| `~/.local/state/omarchy/omascratch/notes.txt` | written as you type (debounced ~0.4s); read at startup and when it changes on disk |
+| `~/.local/state/omarchy/omascratch/notes/<id>.txt` | the open note is written as you type (debounced ~0.4s) and when you leave it; read when you open it and when it changes on disk; the folder is listed each time the list shows |
+| `~/.local/state/omarchy/omascratch/titles.json` | written when you set or clear a title with Ctrl+T, or delete a titled note; read at startup |
+| `~/.local/state/omarchy/omascratch/trash/` | a deleted note is moved here |
+| `~/.local/state/omarchy/omascratch/notes.txt` | read once, at the first start after upgrading, then renamed to `notes.txt.bak` |
 | `~/.local/state/omarchy/omascratch/settings.json` | written when you change a setting; read at startup |
 | `~/.config/hypr/bindings.lua` | **only** when you click Apply or Clear in the settings view |
 | `~/.config/omarchy/shell.json` | read only, at startup and when it changes (to know which edge the bar is on) |
 | `~/.local/state/omarchy/toggles/bar-off` | existence checked only, to know whether the bar is hidden |
 
 The plugin itself runs `python3`, `mkdir` and `test` through Quickshell's
-`Process`, plus `bash` to run `omascratch-ctl.sh`. `python3` is what reads the
+`Process`, plus `bash` to run `omascratch-ctl.sh`. `omascratch-notes.py`
+(also run with `python3`) lists the notes folder, moves deleted notes to the
+trash and does the one-time upgrade from `notes.txt`; it judges a note by the
+same rules as the reader below. `python3` is what reads the
 notes, the settings and the bar configuration back off disk: it opens each one
 refusing symlinks and anything that is not a plain file, refuses to wait on a
 pipe, and reports a file it would not read rather than returning it empty.
@@ -184,9 +220,12 @@ automatically).
 
 ## State files
 
-- `~/.local/state/omarchy/omascratch/notes.txt` — your notes, plain text.
+- `~/.local/state/omarchy/omascratch/notes/` holds your notes, one plain
+  text file each, named by when the note was created.
+- `~/.local/state/omarchy/omascratch/titles.json` holds the titles set with
+  Ctrl+T.
 - `~/.local/state/omarchy/omascratch/settings.json` — font size, position,
-  keybind. Created on first change; sensible defaults apply until then
+  keybind, list order. Created on first change; sensible defaults apply until then
   (14px, top-left, and no keybind until you set one).
 
 ## License
